@@ -1,4 +1,5 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
 
 const STORAGE_KEY = "mindmap_explain_tool_v7";
 const NEWLINE = String.fromCharCode(10);
@@ -154,17 +155,22 @@ function layoutMap(tree) {
     );
   }
 
-  function placeHidden(node, y, x) {
+  function placeHidden(node, y, x, parentId = null) {
     if (!node) return;
     positions[node.id] = { x, y };
     visibility[node.id] = false;
+
+    if (parentId) {
+      edges.push({ from: parentId, to: node.id, color: node.color, visible: false });
+    }
 
     const hiddenChildren = node.children || [];
     hiddenChildren.forEach((child, index) => {
       placeHidden(
         child,
         y + (index - (hiddenChildren.length - 1) / 2) * 18,
-        x + topicWidth(node) + xGap
+        x + topicWidth(node) + xGap,
+        node.id
       );
     });
   }
@@ -195,7 +201,8 @@ function layoutMap(tree) {
         placeHidden(
           child,
           y + (index - (allChildren.length - 1) / 2) * 18,
-          x + topicWidth(node) + xGap
+          x + topicWidth(node) + xGap,
+          node.id
         );
       });
     }
@@ -282,6 +289,43 @@ function Button({ children, onClick, disabled, active }) {
     >
       {children}
     </button>
+  );
+}
+
+function AnimatedEdge({ edge, index, drawn, activeMap, showMode, selectedId }) {
+  const a = drawn.positions[edge.from];
+  const b = drawn.positions[edge.to];
+
+  if (!isPoint(a) || !isPoint(b)) return null;
+
+  const startX = a.x + topicWidth(activeMap.nodes[edge.from]) + 18;
+  const endX = b.x - 20;
+  const dx = Math.max(80, endX - startX);
+  const c1x = startX + dx * 0.5;
+  const c2x = endX - dx * 0.5;
+  const color = STROKE[edge.color] || "#94a3b8";
+  const edgeFocus = !showMode || edge.to === selectedId || edge.from === selectedId;
+  const edgeOpacity = edge.visible === false ? 0 : showMode ? (edgeFocus ? 1 : 0.15) : 1;
+  const d = `M ${startX} ${a.y} C ${c1x} ${a.y}, ${c2x} ${b.y}, ${endX} ${b.y}`;
+
+  return (
+    <motion.path
+      key={`${edge.from}_${edge.to}_${index}`}
+      d={d}
+      fill="none"
+      stroke={color}
+      strokeWidth="4"
+      strokeLinecap="round"
+      initial={false}
+      animate={{
+        d,
+        opacity: edgeOpacity,
+      }}
+      transition={{
+        d: { duration: 0.35, ease: "easeInOut" },
+        opacity: { duration: 0.35, ease: "easeInOut" },
+      }}
+    />
   );
 }
 
@@ -672,20 +716,19 @@ export default function MindMapTool() {
       <main className={(panning ? "cursor-grabbing" : "cursor-grab") + " relative z-10 h-full w-full overflow-hidden overscroll-none touch-none"} onMouseDown={startPan} onMouseMove={movePan} onMouseUp={stopPan} onMouseLeave={stopPan} onWheel={onWheel}>
         <div className="absolute left-0 top-0 origin-top-left" style={{ transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.zoom})` }}>
           <svg className="absolute overflow-visible" width="1" height="1">
-            {drawn.edges.map((edge, index) => {
-              const a = drawn.positions[edge.from];
-              const b = drawn.positions[edge.to];
-              if (!isPoint(a) || !isPoint(b)) return null;
-              const startX = a.x + topicWidth(activeMap.nodes[edge.from]) + 18;
-              const endX = b.x - 20;
-              const dx = Math.max(80, endX - startX);
-              const c1x = startX + dx * 0.5;
-              const c2x = endX - dx * 0.5;
-              const color = STROKE[edge.color] || "#94a3b8";
-              const edgeFocus = !showMode || edge.to === selectedId || edge.from === selectedId;
-              const edgeClass = "transition-all duration-500 ease-out " + (edge.visible === false ? "opacity-0" : showMode ? (edgeFocus ? "opacity-100" : "opacity-15") : "opacity-100");
-              return <path key={`${edge.from}_${edge.to}_${index}`} className={edgeClass} d={`M ${startX} ${a.y} C ${c1x} ${a.y}, ${c2x} ${b.y}, ${endX} ${b.y}`} fill="none" stroke={color} strokeWidth="4" strokeLinecap="round" />;
-            })}
+            <AnimatePresence initial={false}>
+              {drawn.edges.map((edge, index) => (
+                <AnimatedEdge
+                  key={`${edge.from}_${edge.to}`}
+                  edge={edge}
+                  index={index}
+                  drawn={drawn}
+                  activeMap={activeMap}
+                  showMode={showMode}
+                  selectedId={selectedId}
+                />
+              ))}
+            </AnimatePresence>
           </svg>
 
           {Object.keys(drawn.positions).map((nodeId) => {
