@@ -1,9 +1,9 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence } from "framer-motion";
 import AnimatedEdge from "./components/AnimatedEdge";
 import Button from "./components/Button";
 import Topic from "./components/Topic";
-import { COLORS, STORAGE_KEY } from "./constants";
+import { COLORS, PALETTE_OPTIONS, PALETTE_STORAGE_KEY, PALETTES, STORAGE_KEY } from "./constants";
 import { download } from "./fileUtils";
 import { runSelfTests } from "./mindmapSelfTests";
 import {
@@ -22,13 +22,69 @@ import {
   starter,
 } from "./mindmapUtils";
 
+const ANNOUNCEMENTS = [
+  {
+    title: "ノード並び替え",
+    body: "同じ親を持つノードをドラッグで並び替えられるようになりました。枝ごと持ち上げるように動きます。",
+  },
+  {
+    title: "アウトラインモード強化",
+    body: "アウトライン上で文字編集、Enterで追加、Tabで階層変更ができます。マップと同じデータを編集します。",
+  },
+  {
+    title: "カラーパレット切替",
+    body: "Default、Business、Minimalから見た目を選べます。用途に合わせて雰囲気を切り替えられます。",
+  },
+  {
+    title: "UI/UX整理",
+    body: "ドラッグ中の見え方、線の追従、選択中の表示などを調整して、操作感を分かりやすくしました。",
+  },
+];
+
+const ANNOUNCEMENT_META = [
+  { date: "2026.05.28" },
+  { date: "2026.05.28" },
+  { date: "2026.05.28" },
+  { date: "2026.05.28" },
+];
+
+const ANNOUNCEMENT_DETAILS = [
+  "ドラッグで変更されるのは兄弟ノードの順番だけです。位置情報は保存せず、自動レイアウトのまま使えます。",
+  "アウトラインで編集した内容は、そのままマップにも反映されます。別データではなく同じノードを編集しています。",
+  "色のキーはそのままに、表示だけを切り替えます。資料向けやノート向けなど、使う場面に合わせられます。",
+  "ノードをつかんだ時の浮き上がり、枝の追従、パレットごとの雰囲気などを整えました。",
+];
+
+const latestAnnouncementDate = ANNOUNCEMENT_META.reduce(
+  (latest, item) => (item.date > latest ? item.date : latest),
+  ""
+);
+const ANNOUNCEMENT_SEEN_KEY = "mindmap_announcements_seen_date_v1";
+
 export default function MindMapTool() {
   const fileRef = useRef(null);
   const panRef = useRef(null);
+  const dragRef = useRef(null);
+  const outlineInputRefs = useRef({});
   const anchorRef = useRef(null);
   const didRunTestsRef = useRef(false);
 
-  const [map, setMap] = useState(starter);
+  const [map, setMap] = useState(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      return saved ? normalize(JSON.parse(saved)) : starter();
+    } catch {
+      return starter();
+    }
+  });
+  const [paletteId, setPaletteId] = useState(() => {
+    try {
+      const saved = localStorage.getItem(PALETTE_STORAGE_KEY);
+      return PALETTE_OPTIONS.includes(saved) ? saved : "default";
+    } catch {
+      return "default";
+    }
+  });
   const [selectedId, setSelectedId] = useState("root");
   const [viewport, setViewport] = useState({ x: 250, y: 390, zoom: 1 });
   const [panning, setPanning] = useState(false);
@@ -39,6 +95,15 @@ export default function MindMapTool() {
   const [showMode, setShowMode] = useState(false);
   const [showMap, setShowMap] = useState(null);
   const [toolbarOpen, setToolbarOpen] = useState(true);
+  const [announcementsOpen, setAnnouncementsOpen] = useState(() => {
+    try {
+      return latestAnnouncementDate && localStorage.getItem(ANNOUNCEMENT_SEEN_KEY) !== latestAnnouncementDate;
+    } catch {
+      return false;
+    }
+  });
+  const [expandedAnnouncements, setExpandedAnnouncements] = useState({});
+  const [dragState, setDragState] = useState(null);
 
   useEffect(() => {
     document.documentElement.style.overflow = "hidden";
@@ -60,25 +125,22 @@ export default function MindMapTool() {
 
   useEffect(() => {
     try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        const parsed = normalize(JSON.parse(saved));
-        setMap(parsed);
-      }
-    } catch {
-      // ignore
-    }
-  }, []);
-
-  useEffect(() => {
-    try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(map));
     } catch {
       // ignore
     }
   }, [map]);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem(PALETTE_STORAGE_KEY, paletteId);
+    } catch {
+      // ignore
+    }
+  }, [paletteId]);
+
   const activeMap = showMode && showMap ? showMap : map;
+  const activePalette = PALETTES[paletteId] || PALETTES.default;
   const tree = useMemo(() => makeTree(activeMap.nodes, activeMap.rootId), [activeMap]);
   const drawn = useMemo(() => layoutMap(tree), [tree]);
   const rows = useMemo(() => outline(map.nodes, map.rootId), [map]);
@@ -86,6 +148,58 @@ export default function MindMapTool() {
   const selected = activeMap.nodes[selectedId] || activeMap.nodes[activeMap.rootId] || map.nodes[map.rootId];
   const rawSelectedPos = drawn.positions[selectedId] || drawn.positions[activeMap.rootId];
   const selectedPos = isPoint(rawSelectedPos) ? rawSelectedPos : { x: 0, y: 0 };
+  const dragVisual = useMemo(() => {
+    if (!dragState?.active || showMode) {
+      return { nodeIds: new Set(), dx: 0, dy: 0 };
+    }
+
+    const node = map.nodes[dragState.nodeId];
+    if (!node) return { nodeIds: new Set(), dx: 0, dy: 0 };
+
+    return {
+      nodeIds: new Set([node.id, ...descendants(map.nodes, node.id)]),
+      dx: (dragState.currentClientX - dragState.startClientX) / viewport.zoom,
+      dy: (dragState.currentClientY - dragState.startClientY) / viewport.zoom,
+    };
+  }, [dragState, map.nodes, showMode, viewport.zoom]);
+  const visualDrawn = useMemo(() => {
+    if (!dragState?.active || !dragVisual.nodeIds.size) return drawn;
+
+    const positions = { ...drawn.positions };
+    dragVisual.nodeIds.forEach((nodeId) => {
+      const pos = positions[nodeId];
+      if (!isPoint(pos)) return;
+      positions[nodeId] = {
+        x: pos.x + dragVisual.dx,
+        y: pos.y + dragVisual.dy,
+      };
+    });
+
+    return { ...drawn, positions };
+  }, [dragState, dragVisual, drawn]);
+  const dragIndicator = useMemo(() => {
+    if (!dragState?.active || showMode) return null;
+
+    const node = map.nodes[dragState.nodeId];
+    if (!node || !node.parentId) return null;
+
+    const nodePos = drawn.positions[node.id];
+    if (!isPoint(nodePos)) return null;
+
+    const siblings = children(map.nodes, node.parentId).filter((sibling) => sibling.id !== node.id);
+    const before = siblings[dragState.targetIndex];
+    const after = siblings[dragState.targetIndex - 1];
+    const beforePos = before ? drawn.positions[before.id] : null;
+    const afterPos = after ? drawn.positions[after.id] : null;
+
+    let y = nodePos.y;
+    if (isPoint(beforePos) && isPoint(afterPos)) y = (beforePos.y + afterPos.y) / 2;
+    else if (isPoint(beforePos)) y = beforePos.y - 54;
+    else if (isPoint(afterPos)) y = afterPos.y + 54;
+
+    return { x: nodePos.x - 12, y };
+  }, [dragState, drawn.positions, map.nodes, showMode]);
+  const hasNodeDrag = dragState !== null;
 
   useLayoutEffect(() => {
     const anchor = anchorRef.current;
@@ -106,7 +220,7 @@ export default function MindMapTool() {
     }));
   }, [drawn]);
 
-  function commit(updater, nextSelected = selectedId) {
+  const commit = useCallback((updater, nextSelected = selectedId) => {
     setMap((current) => {
       const next = normalize(typeof updater === "function" ? updater(current) : updater);
       setHistory((h) => ({ past: [...h.past.slice(-50), current], future: [] }));
@@ -114,7 +228,7 @@ export default function MindMapTool() {
     });
 
     setSelectedId(nextSelected);
-  }
+  }, [selectedId]);
 
   function selectNode(nodeId) {
     setSelectedId(nodeId);
@@ -169,6 +283,325 @@ export default function MindMapTool() {
 
     return nextNodes;
   }
+
+  function focusOutlineInput(nodeId, select = false) {
+    window.setTimeout(() => {
+      const input = outlineInputRefs.current[nodeId];
+      if (!input) return;
+
+      input.focus();
+      if (select) {
+        input.select();
+        return;
+      }
+
+      const end = input.value.length;
+      input.setSelectionRange(end, end);
+    }, 0);
+  }
+
+  function updateOutlineText(nodeId, text) {
+    setMap((current) => {
+      const node = current.nodes[nodeId];
+      if (!node) return current;
+
+      return {
+        ...current,
+        nodes: {
+          ...current.nodes,
+          [nodeId]: { ...node, text },
+        },
+      };
+    });
+
+    setSelectedId(nodeId);
+  }
+
+  function finishOutlineText(nodeId) {
+    const text = map.nodes[nodeId]?.text;
+    if (text == null || text.trim()) return;
+    updateOutlineText(nodeId, "Untitled");
+  }
+
+  function addOutlineSiblingAfter(nodeId) {
+    const newId = createId();
+
+    commit(
+      (current) => {
+        const base = current.nodes[nodeId];
+        if (!base) return current;
+
+        const parentId = base.parentId || current.rootId;
+        const normalizedNodes = normalizeSiblingOrders(current.nodes, parentId);
+        const siblings = children(normalizedNodes, parentId);
+        const baseIndex = base.parentId ? siblings.findIndex((node) => node.id === nodeId) : siblings.length - 1;
+        const insertIndex = Math.max(0, baseIndex + 1);
+        const color =
+          parentId === current.rootId
+            ? COLORS[childCount(normalizedNodes, current.rootId) % COLORS.length]
+            : majorColorFor({ ...current, nodes: normalizedNodes }, parentId);
+        const newNode = {
+          id: newId,
+          parentId,
+          text: "Untitled",
+          order: insertIndex,
+          collapsed: false,
+          color,
+        };
+        const orderedIds = [
+          ...siblings.slice(0, insertIndex).map((node) => node.id),
+          newId,
+          ...siblings.slice(insertIndex).map((node) => node.id),
+        ];
+        const nextNodes = {
+          ...normalizedNodes,
+          [parentId]: { ...normalizedNodes[parentId], collapsed: false },
+          [newId]: newNode,
+        };
+
+        orderedIds.forEach((id, index) => {
+          nextNodes[id] = { ...nextNodes[id], order: index };
+        });
+
+        return { ...current, nodes: nextNodes };
+      },
+      newId
+    );
+
+    focusOutlineInput(newId, true);
+  }
+
+  function indentOutlineNode(nodeId) {
+    const node = map.nodes[nodeId];
+    if (!node || !node.parentId) return;
+
+    commit(
+      (current) => {
+        const currentNode = current.nodes[nodeId];
+        if (!currentNode || !currentNode.parentId) return current;
+
+        const oldParentId = currentNode.parentId;
+        const siblings = children(current.nodes, oldParentId);
+        const currentIndex = siblings.findIndex((sibling) => sibling.id === nodeId);
+        const newParent = siblings[currentIndex - 1];
+        if (!newParent) return current;
+
+        const nextNodes = {
+          ...current.nodes,
+          [newParent.id]: { ...current.nodes[newParent.id], collapsed: false },
+          [nodeId]: {
+            ...currentNode,
+            parentId: newParent.id,
+            order: nextOrder(current.nodes, newParent.id),
+          },
+        };
+
+        return {
+          ...current,
+          nodes: normalizeSiblingOrders(normalizeSiblingOrders(nextNodes, oldParentId), newParent.id),
+        };
+      },
+      nodeId
+    );
+
+    focusOutlineInput(nodeId);
+  }
+
+  function outdentOutlineNode(nodeId) {
+    const node = map.nodes[nodeId];
+    const parent = node?.parentId ? map.nodes[node.parentId] : null;
+    if (!node || !parent?.parentId) return;
+
+    commit(
+      (current) => {
+        const currentNode = current.nodes[nodeId];
+        const currentParent = currentNode?.parentId ? current.nodes[currentNode.parentId] : null;
+        if (!currentNode || !currentParent?.parentId) return current;
+
+        const oldParentId = currentParent.id;
+        const newParentId = currentParent.parentId;
+        let nextNodes = {
+          ...current.nodes,
+          [nodeId]: { ...currentNode, parentId: newParentId },
+        };
+
+        nextNodes = normalizeSiblingOrders(nextNodes, oldParentId);
+
+        const siblings = children(nextNodes, newParentId).filter((sibling) => sibling.id !== nodeId);
+        const parentIndex = siblings.findIndex((sibling) => sibling.id === oldParentId);
+        const insertIndex = parentIndex < 0 ? siblings.length : parentIndex + 1;
+        const orderedIds = [
+          ...siblings.slice(0, insertIndex).map((sibling) => sibling.id),
+          nodeId,
+          ...siblings.slice(insertIndex).map((sibling) => sibling.id),
+        ];
+
+        orderedIds.forEach((id, index) => {
+          nextNodes[id] = { ...nextNodes[id], order: index };
+        });
+
+        return { ...current, nodes: nextNodes };
+      },
+      nodeId
+    );
+
+    focusOutlineInput(nodeId);
+  }
+
+  function handleOutlineKeyDown(e, nodeId) {
+    if ((e.nativeEvent?.isComposing || e.isComposing) && e.key === "Enter") return;
+
+    if (e.key === "Enter") {
+      e.preventDefault();
+      addOutlineSiblingAfter(nodeId);
+      return;
+    }
+
+    if (e.key === "Tab") {
+      e.preventDefault();
+      if (e.shiftKey) outdentOutlineNode(nodeId);
+      else indentOutlineNode(nodeId);
+    }
+  }
+
+  const siblingDropIndex = useCallback((nodes, parentId, nodeId, clientY) => {
+    const mapY = (clientY - viewport.y) / viewport.zoom;
+    const siblings = children(nodes, parentId).filter((node) => node.id !== nodeId);
+
+    for (let index = 0; index < siblings.length; index += 1) {
+      const pos = drawn.positions[siblings[index].id];
+      if (isPoint(pos) && mapY < pos.y) return index;
+    }
+
+    return siblings.length;
+  }, [drawn.positions, viewport.y, viewport.zoom]);
+
+  const siblingOrderIds = useCallback((nodes, parentId, nodeId, targetIndex) => {
+    const list = children(nodes, parentId);
+    const moving = list.find((node) => node.id === nodeId);
+    if (!moving) return list.map((node) => node.id);
+
+    const withoutMoving = list.filter((node) => node.id !== nodeId);
+    const safeIndex = Number.isFinite(targetIndex)
+      ? Math.max(0, Math.min(targetIndex, withoutMoving.length))
+      : list.findIndex((node) => node.id === nodeId);
+
+    return [
+      ...withoutMoving.slice(0, safeIndex).map((node) => node.id),
+      moving.id,
+      ...withoutMoving.slice(safeIndex).map((node) => node.id),
+    ];
+  }, []);
+
+  const sameOrder = useCallback((a, b) => {
+    return a.length === b.length && a.every((id, index) => id === b[index]);
+  }, []);
+
+  const reorderSibling = useCallback((nodeId, parentId, targetIndex) => {
+    const node = map.nodes[nodeId];
+    if (!node || node.parentId !== parentId) return;
+
+    const currentIds = children(map.nodes, parentId).map((sibling) => sibling.id);
+    const nextIds = siblingOrderIds(map.nodes, parentId, nodeId, targetIndex);
+    if (sameOrder(currentIds, nextIds)) return;
+
+    commit(
+      (current) => {
+        const currentNode = current.nodes[nodeId];
+        if (!currentNode || currentNode.parentId !== parentId) return current;
+
+        const orderedIds = siblingOrderIds(current.nodes, parentId, nodeId, targetIndex);
+        const nextNodes = { ...current.nodes };
+
+        orderedIds.forEach((id, index) => {
+          nextNodes[id] = { ...nextNodes[id], order: index };
+        });
+
+        return { ...current, nodes: nextNodes };
+      },
+      nodeId
+    );
+  }, [commit, map.nodes, sameOrder, siblingOrderIds]);
+
+  function beginNodeDrag(e, nodeId) {
+    if (showMode || e.button !== 0) return;
+
+    const node = map.nodes[nodeId];
+    if (!node || !node.parentId) return;
+
+    const siblings = children(map.nodes, node.parentId);
+    if (siblings.length < 2) return;
+
+    e.preventDefault();
+    setPanning(false);
+    panRef.current = null;
+
+    const sourceIndex = siblings.findIndex((sibling) => sibling.id === nodeId);
+    const nextDrag = {
+      nodeId,
+      parentId: node.parentId,
+      startClientX: e.clientX,
+      startClientY: e.clientY,
+      currentClientX: e.clientX,
+      currentClientY: e.clientY,
+      sourceIndex,
+      targetIndex: sourceIndex,
+      active: false,
+    };
+
+    dragRef.current = nextDrag;
+    setDragState(nextDrag);
+  }
+
+  useEffect(() => {
+    if (!hasNodeDrag) return undefined;
+
+    function moveNodeDrag(e) {
+      const current = dragRef.current;
+      if (!current) return;
+
+      const dx = e.clientX - current.startClientX;
+      const dy = e.clientY - current.startClientY;
+      const active = current.active || Math.abs(dx) > 5 || Math.abs(dy) > 5;
+      const targetIndex = active
+        ? siblingDropIndex(map.nodes, current.parentId, current.nodeId, e.clientY)
+        : current.targetIndex;
+
+      if (active) {
+        e.preventDefault();
+        setToolbarOpen(false);
+      }
+
+      const nextDrag = {
+        ...current,
+        currentClientX: e.clientX,
+        currentClientY: e.clientY,
+        targetIndex,
+        active,
+      };
+
+      dragRef.current = nextDrag;
+      setDragState(nextDrag);
+    }
+
+    function stopNodeDrag() {
+      const current = dragRef.current;
+      dragRef.current = null;
+      setDragState(null);
+
+      if (current?.active) {
+        reorderSibling(current.nodeId, current.parentId, current.targetIndex);
+      }
+    }
+
+    window.addEventListener("mousemove", moveNodeDrag);
+    window.addEventListener("mouseup", stopNodeDrag);
+
+    return () => {
+      window.removeEventListener("mousemove", moveNodeDrag);
+      window.removeEventListener("mouseup", stopNodeDrag);
+    };
+  }, [hasNodeDrag, map.nodes, reorderSibling, siblingDropIndex]);
 
   function addChild(parentId) {
     const newId = createId();
@@ -347,6 +780,23 @@ export default function MindMapTool() {
     panRef.current = null;
   }
 
+  function closeAnnouncements() {
+    setAnnouncementsOpen(false);
+
+    try {
+      if (latestAnnouncementDate) localStorage.setItem(ANNOUNCEMENT_SEEN_KEY, latestAnnouncementDate);
+    } catch {
+      // ignore
+    }
+  }
+
+  function toggleAnnouncement(index) {
+    setExpandedAnnouncements((current) => ({
+      ...current,
+      [index]: !current[index],
+    }));
+  }
+
   useEffect(() => {
     function key(e) {
       const target = e.target;
@@ -361,6 +811,11 @@ export default function MindMapTool() {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") {
         e.preventDefault();
         redo();
+        return;
+      }
+
+      if (e.key === "Escape" && announcementsOpen) {
+        closeAnnouncements();
         return;
       }
 
@@ -394,7 +849,7 @@ export default function MindMapTool() {
 
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
-  }, [map, selectedId, showMode, history, activeMap]);
+  }, [map, selectedId, showMode, history, activeMap, announcementsOpen]);
 
   async function importJson(e) {
     const file = e.target.files?.[0];
@@ -444,7 +899,26 @@ export default function MindMapTool() {
           </div>
 
           <div className="rounded-[28px] border border-white/70 bg-white/85 p-3 shadow-xl shadow-slate-200/70 backdrop-blur-xl">
+            <div className="mb-3 flex justify-end">
+              <div className="flex rounded-full border border-slate-200 bg-slate-100/80 p-1">
+                {PALETTE_OPTIONS.map((option) => (
+                  <button
+                    key={option}
+                    type="button"
+                    onClick={() => setPaletteId(option)}
+                    className={
+                      (paletteId === option ? "bg-slate-900 text-white shadow-sm " : "text-slate-600 hover:bg-white/70 ") +
+                      "rounded-full px-3 py-1 text-xs font-black transition"
+                    }
+                  >
+                    {PALETTES[option].label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <div className="flex flex-wrap justify-end gap-2">
+              <Button onClick={() => setAnnouncementsOpen(true)}>お知らせ</Button>
               <Button onClick={startShowMode}>見せる</Button>
               <Button onClick={() => setViewport({ x: 250, y: 390, zoom: 1 })}>位置リセット</Button>
               <Button onClick={() => download("mindmap.json", JSON.stringify(map, null, 2), "application/json")}>
@@ -479,19 +953,34 @@ export default function MindMapTool() {
 
           <div className="h-full overflow-auto p-3 pb-24">
             {rows.map((row) => (
-              <button
+              <div
                 key={row.id}
-                type="button"
                 onClick={() => setSelectedId(row.id)}
                 className={
                   (selectedId === row.id ? "bg-slate-900 text-white shadow " : "hover:bg-slate-100 ") +
-                  "mb-1 block w-full rounded-2xl px-3 py-2 text-left text-xs transition"
+                  "mb-1 flex w-full items-center gap-2 rounded-2xl py-1.5 pr-2 text-left text-xs transition"
                 }
                 style={{ paddingLeft: 10 + row.depth * 16 }}
               >
-                {row.collapsed ? "＋ " : ""}
-                {row.text}
-              </button>
+                <span className="w-3 shrink-0 text-center text-[10px] font-black opacity-60">{row.collapsed ? "+" : ""}</span>
+                <input
+                  ref={(input) => {
+                    if (input) outlineInputRefs.current[row.id] = input;
+                    else delete outlineInputRefs.current[row.id];
+                  }}
+                  value={map.nodes[row.id]?.text ?? row.text}
+                  onChange={(e) => updateOutlineText(row.id, e.target.value)}
+                  onFocus={() => setSelectedId(row.id)}
+                  onBlur={() => finishOutlineText(row.id)}
+                  onKeyDown={(e) => handleOutlineKeyDown(e, row.id)}
+                  className={
+                    (selectedId === row.id
+                      ? "text-white placeholder:text-slate-300 "
+                      : "text-slate-800 placeholder:text-slate-400 ") +
+                    "min-w-0 flex-1 bg-transparent py-1 font-bold outline-none"
+                  }
+                />
+              </div>
             ))}
           </div>
         </aside>
@@ -551,8 +1040,82 @@ export default function MindMapTool() {
         </div>
       ) : null}
 
+      {announcementsOpen ? (
+        <div
+          className="absolute inset-0 z-50 flex items-center justify-center bg-slate-950/25 p-5 backdrop-blur-sm"
+          onMouseDown={closeAnnouncements}
+        >
+          <div
+            className="w-full max-w-[640px] rounded-[28px] border border-white/80 bg-white p-5 shadow-2xl shadow-slate-400/30"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div className="mb-4 flex items-start justify-between gap-4">
+              <div>
+                <div className="text-base font-black text-slate-950">更新情報</div>
+                <div className="mt-1 text-xs font-semibold text-slate-500">最近追加された機能のお知らせです。</div>
+              </div>
+              <button
+                type="button"
+                onClick={closeAnnouncements}
+                className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-black text-slate-600 shadow-sm transition hover:bg-slate-50"
+              >
+                閉じる
+              </button>
+            </div>
+
+            <div className="grid gap-3">
+              {ANNOUNCEMENTS.map((item, index) => {
+                const meta = ANNOUNCEMENT_META[index] || {};
+                const isNew = meta.date === latestAnnouncementDate;
+                const isExpanded = Boolean(expandedAnnouncements[index]);
+                const detail = ANNOUNCEMENT_DETAILS[index];
+
+                return (
+                  <button
+                    key={item.title}
+                    type="button"
+                    aria-expanded={isExpanded}
+                    onClick={() => toggleAnnouncement(index)}
+                    className="w-full rounded-2xl border border-slate-200 bg-slate-50/80 p-4 text-left transition duration-150 hover:border-slate-300 hover:bg-white hover:shadow-sm"
+                  >
+                    <div className="mb-1 flex items-start gap-2">
+                      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-900 text-xs font-black text-white">
+                        {index + 1}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="text-sm font-black text-slate-900">{item.title}</div>
+                          <span className="mt-0.5 text-xs font-black text-slate-400">{isExpanded ? "−" : "+"}</span>
+                        </div>
+                        <div className="mt-0.5 flex flex-wrap items-center gap-2 text-[11px] font-bold text-slate-400">
+                          <span>{meta.date}</span>
+                          {isNew ? (
+                            <span className="rounded-full border border-sky-200 bg-sky-50 px-1.5 py-0.5 text-[10px] font-black leading-none text-sky-700">
+                              NEW
+                            </span>
+                          ) : null}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="pl-8 text-sm font-medium leading-6 text-slate-600">{item.body}</div>
+                    <div
+                      className={
+                        (isExpanded ? "mt-3 max-h-40 opacity-100 " : "max-h-0 opacity-0 ") +
+                        "overflow-hidden pl-8 text-sm font-medium leading-6 text-slate-500 transition-all duration-200"
+                      }
+                    >
+                      {detail}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <main
-        className={(panning ? "cursor-grabbing" : "cursor-grab") + " relative z-10 h-full w-full"}
+        className={(panning || dragState?.active ? "cursor-grabbing" : "cursor-grab") + " relative z-10 h-full w-full"}
         onMouseDown={startPan}
         onMouseMove={movePan}
         onMouseUp={stopPan}
@@ -567,13 +1130,14 @@ export default function MindMapTool() {
         >
           <svg className="pointer-events-none absolute overflow-visible" width="1" height="1">
             <AnimatePresence initial={false}>
-              {drawn.edges.map((edge, index) => (
+              {visualDrawn.edges.map((edge, index) => (
                 <AnimatedEdge
                   key={`${edge.from}_${edge.to}_${index}`}
                   edge={edge}
                   index={index}
-                  drawn={drawn}
+                  drawn={visualDrawn}
                   activeMap={activeMap}
+                  palette={activePalette}
                   showMode={showMode}
                   selectedId={selectedId}
                 />
@@ -581,11 +1145,22 @@ export default function MindMapTool() {
             </AnimatePresence>
           </svg>
 
-          {Object.keys(drawn.positions).map((nodeId) => {
+          {dragIndicator ? (
+            <div
+              className="pointer-events-none absolute z-20 h-1 w-44 -translate-y-1/2 rounded-full bg-slate-900/45 shadow-sm ring-2 ring-white/80"
+              style={{ left: dragIndicator.x, top: dragIndicator.y }}
+            />
+          ) : null}
+
+          {Object.keys(visualDrawn.positions).map((nodeId) => {
             const node = activeMap.nodes[nodeId];
-            const pos = drawn.positions[nodeId];
+            const pos = visualDrawn.positions[nodeId];
 
             if (!node || !isPoint(pos)) return null;
+
+            const canDragNode = !showMode && Boolean(node.parentId) && children(activeMap.nodes, node.parentId).length > 1;
+            const isDraggingNode = dragState?.active && dragState.nodeId === nodeId;
+            const isDraggingSubtree = dragVisual.nodeIds.has(nodeId);
 
             return (
               <Topic
@@ -599,8 +1174,13 @@ export default function MindMapTool() {
                 isMajor={node.parentId === activeMap.rootId}
                 focusMode={showMode}
                 focused={selectedId === nodeId}
+                palette={activePalette}
+                draggable={canDragNode}
+                dragging={isDraggingNode}
+                draggingSubtree={isDraggingSubtree}
                 onSelect={selectNode}
                 onEdit={beginEdit}
+                onBeginDrag={beginNodeDrag}
                 onAdd={addChild}
                 onSibling={addSibling}
                 onDelete={removeNode}

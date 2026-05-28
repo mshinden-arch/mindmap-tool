@@ -1,8 +1,8 @@
 import { motion } from "framer-motion";
-import { STROKE } from "../constants";
+import { PALETTES } from "../constants";
 import { isPoint, topicWidth } from "../mindmapUtils";
 
-export default function AnimatedEdge({ edge, index, drawn, activeMap, showMode, selectedId }) {
+export default function AnimatedEdge({ edge, index, drawn, activeMap, palette, showMode, selectedId }) {
   const a = drawn.positions[edge.from];
   const b = drawn.positions[edge.to];
 
@@ -13,9 +13,12 @@ export default function AnimatedEdge({ edge, index, drawn, activeMap, showMode, 
   const dx = Math.max(80, endX - startX);
   const c1x = startX + dx * 0.5;
   const c2x = endX - dx * 0.5;
-  const color = STROKE[edge.color] || "#94a3b8";
+  const activePalette = palette || PALETTES.default;
+  const colorKey = edge.color === "pink" ? "rose" : edge.color;
+  const color = activePalette.stroke[colorKey] || activePalette.stroke.slate;
   const edgeFocus = !showMode || edge.to === selectedId || edge.from === selectedId;
-  const edgeOpacity = edge.visible === false ? 0 : showMode ? (edgeFocus ? 1 : 0.15) : 1;
+  const baseOpacity = edge.visible === false ? 0 : showMode ? (edgeFocus ? 1 : 0.15) : 1;
+  const edgeOpacity = baseOpacity * (activePalette.edgeOpacity ?? 1);
   const d = `M ${startX} ${a.y} C ${c1x} ${a.y}, ${c2x} ${b.y}, ${endX} ${b.y}`;
 
   return (
@@ -25,7 +28,7 @@ export default function AnimatedEdge({ edge, index, drawn, activeMap, showMode, 
       d={d}
       fill="none"
       stroke={color}
-      strokeWidth="4"
+      strokeWidth={activePalette.edgeWidth || 4}
       strokeLinecap="round"
       initial={false}
       animate={{
