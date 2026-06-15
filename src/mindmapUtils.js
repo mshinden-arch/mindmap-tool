@@ -244,6 +244,19 @@ export function prepareShowMap(inputMap) {
   return { ...inputMap, nodes: nextNodes };
 }
 
+export function createExpandedMap(inputMap) {
+  const nextNodes = {};
+
+  Object.values(inputMap.nodes).forEach((node) => {
+    nextNodes[node.id] = {
+      ...node,
+      collapsed: false,
+    };
+  });
+
+  return { ...inputMap, nodes: nextNodes };
+}
+
 export function markdown(nodes, rootId) {
   const lines = [];
 

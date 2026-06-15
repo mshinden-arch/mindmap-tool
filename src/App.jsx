@@ -5,10 +5,12 @@ import Button from "./components/Button";
 import Topic from "./components/Topic";
 import { COLORS, PALETTE_OPTIONS, PALETTE_STORAGE_KEY, PALETTES, STORAGE_KEY } from "./constants";
 import { download } from "./fileUtils";
+import { copyMindMapImage, saveMindMapImage } from "./imageExport";
 import { runSelfTests } from "./mindmapSelfTests";
 import {
   childCount,
   children,
+  createExpandedMap,
   createId,
   descendants,
   isPoint,
@@ -23,6 +25,10 @@ import {
 } from "./mindmapUtils";
 
 const ANNOUNCEMENTS = [
+  {
+    title: "画像共有機能追加",
+    body: "現在の見え方をそのままコピーする機能と、マップ全体を資料用PNGとして保存する機能を追加しました。",
+  },
   {
     title: "ノード並び替え",
     body: "同じ親を持つノードをドラッグで並び替えられるようになりました。枝ごと持ち上げるように動きます。",
@@ -42,23 +48,26 @@ const ANNOUNCEMENTS = [
 ];
 
 const ANNOUNCEMENT_META = [
-  { date: "2026.05.28" },
-  { date: "2026.05.28" },
-  { date: "2026.05.28" },
-  { date: "2026.05.28" },
+  { date: "2026.05.28", release: "2026.05.28-image-sharing", releaseOrder: 2 },
+  { date: "2026.05.28", release: "2026.05.28-initial", releaseOrder: 1 },
+  { date: "2026.05.28", release: "2026.05.28-initial", releaseOrder: 1 },
+  { date: "2026.05.28", release: "2026.05.28-initial", releaseOrder: 1 },
+  { date: "2026.05.28", release: "2026.05.28-initial", releaseOrder: 1 },
 ];
 
 const ANNOUNCEMENT_DETAILS = [
+  "📋 画像コピー\n現在表示しているマインドマップを、そのまま画像としてクリップボードへコピーできます。\n・折りたたみ状態を維持\n・透過背景\n・Teams、LINE、Slack、PowerPointなどへそのまま貼り付け可能\n\n📷 全展開保存\nマップ全体を一時的に展開した状態でPNG画像として保存できます。\n・実データは変更しない\n・折りたたみ状態は保存後も維持\n・透過背景\n・資料作成や議事録用途を想定",
   "ドラッグで変更されるのは兄弟ノードの順番だけです。位置情報は保存せず、自動レイアウトのまま使えます。",
   "アウトラインで編集した内容は、そのままマップにも反映されます。別データではなく同じノードを編集しています。",
   "色のキーはそのままに、表示だけを切り替えます。資料向けやノート向けなど、使う場面に合わせられます。",
   "ノードをつかんだ時の浮き上がり、枝の追従、パレットごとの雰囲気などを整えました。",
 ];
 
-const latestAnnouncementDate = ANNOUNCEMENT_META.reduce(
-  (latest, item) => (item.date > latest ? item.date : latest),
-  ""
+const latestAnnouncement = ANNOUNCEMENT_META.reduce(
+  (latest, item) => (item.releaseOrder > (latest?.releaseOrder ?? -1) ? item : latest),
+  null
 );
+const latestAnnouncementRelease = latestAnnouncement?.release || "";
 const ANNOUNCEMENT_SEEN_KEY = "mindmap_announcements_seen_date_v1";
 
 export default function MindMapTool() {
@@ -97,13 +106,18 @@ export default function MindMapTool() {
   const [toolbarOpen, setToolbarOpen] = useState(true);
   const [announcementsOpen, setAnnouncementsOpen] = useState(() => {
     try {
-      return latestAnnouncementDate && localStorage.getItem(ANNOUNCEMENT_SEEN_KEY) !== latestAnnouncementDate;
+      return (
+        latestAnnouncementRelease &&
+        localStorage.getItem(ANNOUNCEMENT_SEEN_KEY) !== latestAnnouncementRelease
+      );
     } catch {
       return false;
     }
   });
   const [expandedAnnouncements, setExpandedAnnouncements] = useState({});
   const [dragState, setDragState] = useState(null);
+  const [imageExporting, setImageExporting] = useState(null);
+  const [shareNotice, setShareNotice] = useState(null);
 
   useEffect(() => {
     document.documentElement.style.overflow = "hidden";
@@ -138,6 +152,13 @@ export default function MindMapTool() {
       // ignore
     }
   }, [paletteId]);
+
+  useEffect(() => {
+    if (!shareNotice) return undefined;
+
+    const timer = window.setTimeout(() => setShareNotice(null), shareNotice.type === "error" ? 6000 : 3500);
+    return () => window.clearTimeout(timer);
+  }, [shareNotice]);
 
   const activeMap = showMode && showMap ? showMap : map;
   const activePalette = PALETTES[paletteId] || PALETTES.default;
@@ -784,7 +805,9 @@ export default function MindMapTool() {
     setAnnouncementsOpen(false);
 
     try {
-      if (latestAnnouncementDate) localStorage.setItem(ANNOUNCEMENT_SEEN_KEY, latestAnnouncementDate);
+      if (latestAnnouncementRelease) {
+        localStorage.setItem(ANNOUNCEMENT_SEEN_KEY, latestAnnouncementRelease);
+      }
     } catch {
       // ignore
     }
@@ -865,6 +888,38 @@ export default function MindMapTool() {
     e.target.value = "";
   }
 
+  async function copyCurrentImage() {
+    setImageExporting("copy");
+    setShareNotice(null);
+
+    try {
+      await copyMindMapImage(map, paletteId);
+      setShareNotice({ type: "success", message: "現在見えているマップを画像としてコピーしました。" });
+    } catch (error) {
+      setShareNotice({ type: "error", message: error.message || "画像をコピーできませんでした。" });
+    } finally {
+      setImageExporting(null);
+    }
+  }
+
+  async function saveExpandedImage() {
+    setImageExporting("save");
+    setShareNotice(null);
+
+    try {
+      const expandedViewMap = createExpandedMap(map);
+      await saveMindMapImage(expandedViewMap, paletteId);
+      setShareNotice({
+        type: "success",
+        message: "全体を展開したPNGを保存しました。元の折りたたみ状態は維持されています。",
+      });
+    } catch (error) {
+      setShareNotice({ type: "error", message: error.message || "画像を保存できませんでした。" });
+    } finally {
+      setImageExporting(null);
+    }
+  }
+
   return (
     <div className="h-screen w-full overflow-hidden bg-gradient-to-br from-slate-50 via-white to-sky-50 text-slate-950">
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_1px_1px,#dbeafe_1px,transparent_0)] [background-size:28px_28px] opacity-80" />
@@ -915,6 +970,19 @@ export default function MindMapTool() {
                   </button>
                 ))}
               </div>
+            </div>
+
+            <div className="mb-3 flex flex-wrap items-center justify-end gap-2 border-b border-slate-100 pb-3">
+              <div className="mr-auto min-w-28 text-right">
+                <div className="text-xs font-black text-slate-700">共有</div>
+                <div className="text-[10px] font-bold text-slate-400">見えている状態 / 全体資料</div>
+              </div>
+              <Button disabled={Boolean(imageExporting)} onClick={copyCurrentImage}>
+                {imageExporting === "copy" ? "作成中..." : "📋 画像コピー"}
+              </Button>
+              <Button disabled={Boolean(imageExporting)} onClick={saveExpandedImage}>
+                {imageExporting === "save" ? "作成中..." : "📷 全展開保存"}
+              </Button>
             </div>
 
             <div className="flex flex-wrap justify-end gap-2">
@@ -1046,7 +1114,7 @@ export default function MindMapTool() {
           onMouseDown={closeAnnouncements}
         >
           <div
-            className="w-full max-w-[640px] rounded-[28px] border border-white/80 bg-white p-5 shadow-2xl shadow-slate-400/30"
+            className="max-h-[calc(100vh-40px)] w-full max-w-[640px] overflow-y-auto rounded-[28px] border border-white/80 bg-white p-5 shadow-2xl shadow-slate-400/30"
             onMouseDown={(e) => e.stopPropagation()}
           >
             <div className="mb-4 flex items-start justify-between gap-4">
@@ -1066,7 +1134,7 @@ export default function MindMapTool() {
             <div className="grid gap-3">
               {ANNOUNCEMENTS.map((item, index) => {
                 const meta = ANNOUNCEMENT_META[index] || {};
-                const isNew = meta.date === latestAnnouncementDate;
+                const isNew = meta.release === latestAnnouncementRelease;
                 const isExpanded = Boolean(expandedAnnouncements[index]);
                 const detail = ANNOUNCEMENT_DETAILS[index];
 
@@ -1100,8 +1168,8 @@ export default function MindMapTool() {
                     <div className="pl-8 text-sm font-medium leading-6 text-slate-600">{item.body}</div>
                     <div
                       className={
-                        (isExpanded ? "mt-3 max-h-40 opacity-100 " : "max-h-0 opacity-0 ") +
-                        "overflow-hidden pl-8 text-sm font-medium leading-6 text-slate-500 transition-all duration-200"
+                        (isExpanded ? "mt-3 max-h-[520px] opacity-100 " : "max-h-0 opacity-0 ") +
+                        "whitespace-pre-line overflow-hidden pl-8 text-sm font-medium leading-6 text-slate-500 transition-all duration-200"
                       }
                     >
                       {detail}
@@ -1111,6 +1179,21 @@ export default function MindMapTool() {
               })}
             </div>
           </div>
+        </div>
+      ) : null}
+
+      {shareNotice ? (
+        <div
+          role="status"
+          aria-live="polite"
+          className={
+            (shareNotice.type === "error"
+              ? "border-rose-200 bg-rose-50 text-rose-800 "
+              : "border-emerald-200 bg-emerald-50 text-emerald-800 ") +
+            "absolute bottom-5 right-5 z-[60] max-w-md rounded-2xl border px-4 py-3 text-sm font-bold shadow-xl"
+          }
+        >
+          {shareNotice.message}
         </div>
       ) : null}
 
