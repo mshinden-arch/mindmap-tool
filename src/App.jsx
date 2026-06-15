@@ -8,6 +8,13 @@ import { download } from "./fileUtils";
 import { copyMindMapImage, saveMindMapImage } from "./imageExport";
 import { runSelfTests } from "./mindmapSelfTests";
 import {
+  cloneSharedMap,
+  copyTextToClipboard,
+  createShareUrl,
+  hasSharePayload,
+  readShareUrl,
+} from "./shareLink";
+import {
   childCount,
   children,
   createExpandedMap,
@@ -77,6 +84,11 @@ export default function MindMapTool() {
   const outlineInputRefs = useRef({});
   const anchorRef = useRef(null);
   const didRunTestsRef = useRef(false);
+  const [shareState, setShareState] = useState(() =>
+    hasSharePayload()
+      ? { status: "loading", sourceUrl: window.location.href }
+      : { status: "none" }
+  );
 
   const [map, setMap] = useState(() => {
     try {
@@ -105,6 +117,8 @@ export default function MindMapTool() {
   const [showMap, setShowMap] = useState(null);
   const [toolbarOpen, setToolbarOpen] = useState(true);
   const [announcementsOpen, setAnnouncementsOpen] = useState(() => {
+    if (hasSharePayload()) return false;
+
     try {
       return (
         latestAnnouncementRelease &&
@@ -117,6 +131,7 @@ export default function MindMapTool() {
   const [expandedAnnouncements, setExpandedAnnouncements] = useState({});
   const [dragState, setDragState] = useState(null);
   const [imageExporting, setImageExporting] = useState(null);
+  const [linkExporting, setLinkExporting] = useState(false);
   const [shareNotice, setShareNotice] = useState(null);
 
   useEffect(() => {
@@ -136,6 +151,42 @@ export default function MindMapTool() {
       runSelfTests();
     }
   }, []);
+
+  useEffect(() => {
+    if (shareState.status !== "loading") return undefined;
+
+    let cancelled = false;
+
+    readShareUrl(shareState.sourceUrl)
+      .then((shared) => {
+        if (cancelled) return;
+
+        setShareState({
+          status: "ready",
+          sourceUrl: shareState.sourceUrl,
+          shareVersion: shared.shareVersion,
+          initialMap: shared.map,
+          viewMap: cloneSharedMap(shared.map),
+          paletteId: shared.paletteId,
+        });
+        setSelectedId(shared.map.rootId);
+        setOutlineOpen(false);
+        setToolbarOpen(false);
+        setViewport({ x: 220, y: window.innerHeight * 0.5, zoom: 0.9 });
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setShareState({
+          status: "error",
+          sourceUrl: shareState.sourceUrl,
+          message: error.message || "共有リンクを読み込めませんでした。",
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [shareState.sourceUrl, shareState.status]);
 
   useEffect(() => {
     try {
@@ -160,17 +211,20 @@ export default function MindMapTool() {
     return () => window.clearTimeout(timer);
   }, [shareNotice]);
 
-  const activeMap = showMode && showMap ? showMap : map;
-  const activePalette = PALETTES[paletteId] || PALETTES.default;
+  const isSharedView = shareState.status === "ready";
+  const isShareRoute = shareState.status !== "none";
+  const activeMap = isSharedView ? shareState.viewMap : showMode && showMap ? showMap : map;
+  const activePaletteId = isSharedView ? shareState.paletteId : paletteId;
+  const activePalette = PALETTES[activePaletteId] || PALETTES.default;
   const tree = useMemo(() => makeTree(activeMap.nodes, activeMap.rootId), [activeMap]);
   const drawn = useMemo(() => layoutMap(tree), [tree]);
-  const rows = useMemo(() => outline(map.nodes, map.rootId), [map]);
+  const rows = useMemo(() => outline(activeMap.nodes, activeMap.rootId), [activeMap]);
 
   const selected = activeMap.nodes[selectedId] || activeMap.nodes[activeMap.rootId] || map.nodes[map.rootId];
   const rawSelectedPos = drawn.positions[selectedId] || drawn.positions[activeMap.rootId];
   const selectedPos = isPoint(rawSelectedPos) ? rawSelectedPos : { x: 0, y: 0 };
   const dragVisual = useMemo(() => {
-    if (!dragState?.active || showMode) {
+    if (!dragState?.active || showMode || isSharedView) {
       return { nodeIds: new Set(), dx: 0, dy: 0 };
     }
 
@@ -182,7 +236,7 @@ export default function MindMapTool() {
       dx: (dragState.currentClientX - dragState.startClientX) / viewport.zoom,
       dy: (dragState.currentClientY - dragState.startClientY) / viewport.zoom,
     };
-  }, [dragState, map.nodes, showMode, viewport.zoom]);
+  }, [dragState, isSharedView, map.nodes, showMode, viewport.zoom]);
   const visualDrawn = useMemo(() => {
     if (!dragState?.active || !dragVisual.nodeIds.size) return drawn;
 
@@ -199,7 +253,7 @@ export default function MindMapTool() {
     return { ...drawn, positions };
   }, [dragState, dragVisual, drawn]);
   const dragIndicator = useMemo(() => {
-    if (!dragState?.active || showMode) return null;
+    if (!dragState?.active || showMode || isSharedView) return null;
 
     const node = map.nodes[dragState.nodeId];
     if (!node || !node.parentId) return null;
@@ -219,7 +273,7 @@ export default function MindMapTool() {
     else if (isPoint(afterPos)) y = afterPos.y + 54;
 
     return { x: nodePos.x - 12, y };
-  }, [dragState, drawn.positions, map.nodes, showMode]);
+  }, [dragState, drawn.positions, isSharedView, map.nodes, showMode]);
   const hasNodeDrag = dragState !== null;
 
   useLayoutEffect(() => {
@@ -253,7 +307,7 @@ export default function MindMapTool() {
 
   function selectNode(nodeId) {
     setSelectedId(nodeId);
-    setToolbarOpen(!showMode);
+    setToolbarOpen(!showMode && !isSharedView);
   }
 
   function updateNode(nodeId, patch) {
@@ -281,6 +335,28 @@ export default function MindMapTool() {
         nodes: {
           ...current.nodes,
           [nodeId]: { ...current.nodes[nodeId], ...patch },
+        },
+      };
+    });
+
+    setSelectedId(nodeId);
+  }
+
+  function updateSharedNode(nodeId, patch) {
+    const currentPosition = drawn.positions[nodeId];
+    anchorRef.current = currentPosition ? { nodeId, position: currentPosition } : null;
+
+    setShareState((current) => {
+      if (current.status !== "ready" || !current.viewMap.nodes[nodeId]) return current;
+
+      return {
+        ...current,
+        viewMap: {
+          ...current.viewMap,
+          nodes: {
+            ...current.viewMap.nodes,
+            [nodeId]: { ...current.viewMap.nodes[nodeId], ...patch },
+          },
         },
       };
     });
@@ -545,7 +621,7 @@ export default function MindMapTool() {
   }, [commit, map.nodes, sameOrder, siblingOrderIds]);
 
   function beginNodeDrag(e, nodeId) {
-    if (showMode || e.button !== 0) return;
+    if (showMode || isSharedView || e.button !== 0) return;
 
     const node = map.nodes[nodeId];
     if (!node || !node.parentId) return;
@@ -825,6 +901,13 @@ export default function MindMapTool() {
       const target = e.target;
       const typing = target?.tagName === "INPUT" || target?.tagName === "TEXTAREA";
 
+      if (e.key === "Escape" && announcementsOpen) {
+        closeAnnouncements();
+        return;
+      }
+
+      if (isSharedView) return;
+
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
         e.preventDefault();
         undo();
@@ -834,11 +917,6 @@ export default function MindMapTool() {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") {
         e.preventDefault();
         redo();
-        return;
-      }
-
-      if (e.key === "Escape" && announcementsOpen) {
-        closeAnnouncements();
         return;
       }
 
@@ -872,7 +950,7 @@ export default function MindMapTool() {
 
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
-  }, [map, selectedId, showMode, history, activeMap, announcementsOpen]);
+  }, [map, selectedId, showMode, history, activeMap, announcementsOpen, isSharedView]);
 
   async function importJson(e) {
     const file = e.target.files?.[0];
@@ -920,13 +998,112 @@ export default function MindMapTool() {
     }
   }
 
+  async function copyShareLink() {
+    setLinkExporting(true);
+    setShareNotice(null);
+
+    try {
+      const url = await createShareUrl(map, paletteId);
+      await copyTextToClipboard(url);
+      setShareNotice({ type: "success", message: "閲覧専用の共有リンクをコピーしました。" });
+    } catch (error) {
+      setShareNotice({ type: "error", message: error.message || "共有リンクを作成できませんでした。" });
+    } finally {
+      setLinkExporting(false);
+    }
+  }
+
+  async function recopyShareLink() {
+    setLinkExporting(true);
+    setShareNotice(null);
+
+    try {
+      await copyTextToClipboard(shareState.sourceUrl);
+      setShareNotice({ type: "success", message: "現在の共有リンクをコピーしました。" });
+    } catch (error) {
+      setShareNotice({ type: "error", message: error.message || "共有リンクをコピーできませんでした。" });
+    } finally {
+      setLinkExporting(false);
+    }
+  }
+
+  function resetSharedViewport() {
+    setViewport({ x: 220, y: window.innerHeight * 0.5, zoom: 0.9 });
+  }
+
   return (
     <div className="h-screen w-full overflow-hidden bg-gradient-to-br from-slate-50 via-white to-sky-50 text-slate-950">
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_1px_1px,#dbeafe_1px,transparent_0)] [background-size:28px_28px] opacity-80" />
       <div className="pointer-events-none absolute -right-24 -top-24 h-96 w-96 rounded-full bg-sky-100/70 blur-3xl" />
       <div className="pointer-events-none absolute -bottom-32 left-1/3 h-96 w-96 rounded-full bg-violet-100/60 blur-3xl" />
 
-      {!showMode ? (
+      {shareState.status === "loading" ? (
+        <div className="absolute inset-0 z-50 flex items-center justify-center p-5">
+          <div className="rounded-[28px] border border-white/80 bg-white/90 px-8 py-6 text-center shadow-2xl backdrop-blur-xl">
+            <div className="text-sm font-black text-slate-900">共有マップを読み込んでいます</div>
+            <div className="mt-1 text-xs font-semibold text-slate-500">少しだけお待ちください。</div>
+          </div>
+        </div>
+      ) : null}
+
+      {shareState.status === "error" ? (
+        <div className="absolute inset-0 z-50 flex items-center justify-center p-5">
+          <div className="w-full max-w-md rounded-[28px] border border-rose-100 bg-white/95 p-6 text-center shadow-2xl backdrop-blur-xl">
+            <div className="text-base font-black text-slate-950">共有リンクを開けませんでした</div>
+            <div className="mt-2 text-sm font-medium leading-6 text-slate-600">{shareState.message}</div>
+            <a
+              href={shareState.sourceUrl.split("#")[0]}
+              className="mt-5 inline-flex rounded-full bg-slate-900 px-4 py-2 text-sm font-black text-white shadow transition hover:bg-slate-800"
+            >
+              編集画面を開く
+            </a>
+          </div>
+        </div>
+      ) : null}
+
+      {isSharedView ? (
+        <header className="absolute left-5 right-5 top-5 z-30 flex items-start justify-between gap-4">
+          <div className="rounded-[28px] border border-white/70 bg-white/88 p-3 shadow-xl shadow-slate-200/70 backdrop-blur-xl">
+            <div className="flex items-center gap-3 px-1">
+              <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-slate-900 font-black text-white shadow-lg">
+                M
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <div className="text-sm font-black tracking-tight">MindMap</div>
+                  <span className="rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 text-[10px] font-black text-sky-700">
+                    閲覧専用
+                  </span>
+                </div>
+                <div className="max-w-[420px] truncate text-xs font-semibold text-slate-500">
+                  {activeMap.nodes[activeMap.rootId]?.text}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-[28px] border border-white/70 bg-white/88 p-3 shadow-xl shadow-slate-200/70 backdrop-blur-xl">
+            <div className="mb-2 flex items-center justify-between gap-4 px-1">
+              <div>
+                <div className="text-xs font-black text-slate-700">共有マップ</div>
+                <div className="text-[10px] font-bold text-slate-400">
+                  {PALETTES[activePaletteId]?.label || PALETTES.default.label} パレット
+                </div>
+              </div>
+              <div className="text-[10px] font-bold text-slate-400">開閉状態は保存されません</div>
+            </div>
+            <div className="flex flex-wrap justify-end gap-2">
+              <Button active={outlineOpen} onClick={() => setOutlineOpen((value) => !value)}>
+                アウトライン
+              </Button>
+              <Button disabled={linkExporting} onClick={recopyShareLink}>
+                {linkExporting ? "コピー中..." : "🔗 共有リンクをコピー"}
+              </Button>
+              <Button onClick={resetSharedViewport}>位置リセット</Button>
+            </div>
+          </div>
+        </header>
+      ) : !isShareRoute && !showMode ? (
         <header className="absolute left-5 right-5 top-5 z-30 flex items-start justify-between gap-4">
           <div className="rounded-[28px] border border-white/70 bg-white/85 p-3 shadow-xl shadow-slate-200/70 backdrop-blur-xl">
             <div className="mb-3 flex items-center gap-3 px-1">
@@ -983,6 +1160,9 @@ export default function MindMapTool() {
               <Button disabled={Boolean(imageExporting)} onClick={saveExpandedImage}>
                 {imageExporting === "save" ? "作成中..." : "📷 全展開保存"}
               </Button>
+              <Button disabled={linkExporting} onClick={copyShareLink}>
+                {linkExporting ? "作成中..." : "🔗 共有リンク"}
+              </Button>
             </div>
 
             <div className="flex flex-wrap justify-end gap-2">
@@ -1002,7 +1182,7 @@ export default function MindMapTool() {
             <input ref={fileRef} type="file" accept="application/json,.json" className="hidden" onChange={importJson} />
           </div>
         </header>
-      ) : (
+      ) : !isShareRoute ? (
         <button
           type="button"
           onClick={exitShowMode}
@@ -1010,13 +1190,15 @@ export default function MindMapTool() {
         >
           編集に戻る Esc
         </button>
-      )}
+      ) : null}
 
-      {!showMode && outlineOpen ? (
+      {!showMode && outlineOpen && (isSharedView || !isShareRoute) ? (
         <aside className="absolute bottom-5 left-5 top-36 z-30 w-80 overflow-hidden rounded-[28px] border border-white/70 bg-white/88 shadow-xl shadow-slate-200/70 backdrop-blur-xl">
           <div className="border-b border-slate-100 p-4">
             <div className="text-sm font-black">アウトライン</div>
-            <div className="text-xs text-slate-500">説明順を文章で確認</div>
+            <div className="text-xs text-slate-500">
+              {isSharedView ? "閲覧専用で全体構成を確認" : "説明順を文章で確認"}
+            </div>
           </div>
 
           <div className="h-full overflow-auto p-3 pb-24">
@@ -1031,30 +1213,34 @@ export default function MindMapTool() {
                 style={{ paddingLeft: 10 + row.depth * 16 }}
               >
                 <span className="w-3 shrink-0 text-center text-[10px] font-black opacity-60">{row.collapsed ? "+" : ""}</span>
-                <input
-                  ref={(input) => {
-                    if (input) outlineInputRefs.current[row.id] = input;
-                    else delete outlineInputRefs.current[row.id];
-                  }}
-                  value={map.nodes[row.id]?.text ?? row.text}
-                  onChange={(e) => updateOutlineText(row.id, e.target.value)}
-                  onFocus={() => setSelectedId(row.id)}
-                  onBlur={() => finishOutlineText(row.id)}
-                  onKeyDown={(e) => handleOutlineKeyDown(e, row.id)}
-                  className={
-                    (selectedId === row.id
-                      ? "text-white placeholder:text-slate-300 "
-                      : "text-slate-800 placeholder:text-slate-400 ") +
-                    "min-w-0 flex-1 bg-transparent py-1 font-bold outline-none"
-                  }
-                />
+                {isSharedView ? (
+                  <span className="min-w-0 flex-1 truncate py-1 font-bold">{row.text}</span>
+                ) : (
+                  <input
+                    ref={(input) => {
+                      if (input) outlineInputRefs.current[row.id] = input;
+                      else delete outlineInputRefs.current[row.id];
+                    }}
+                    value={map.nodes[row.id]?.text ?? row.text}
+                    onChange={(e) => updateOutlineText(row.id, e.target.value)}
+                    onFocus={() => setSelectedId(row.id)}
+                    onBlur={() => finishOutlineText(row.id)}
+                    onKeyDown={(e) => handleOutlineKeyDown(e, row.id)}
+                    className={
+                      (selectedId === row.id
+                        ? "text-white placeholder:text-slate-300 "
+                        : "text-slate-800 placeholder:text-slate-400 ") +
+                      "min-w-0 flex-1 bg-transparent py-1 font-bold outline-none"
+                    }
+                  />
+                )}
               </div>
             ))}
           </div>
         </aside>
       ) : null}
 
-      {!showMode && toolbarOpen && selected ? (
+      {!showMode && !isSharedView && !isShareRoute && toolbarOpen && selected ? (
         <div
           className="absolute z-40 flex items-center gap-1 rounded-full border border-white/70 bg-white/92 p-2 shadow-xl shadow-slate-200/80 backdrop-blur-xl"
           style={{
@@ -1086,7 +1272,7 @@ export default function MindMapTool() {
         </div>
       ) : null}
 
-      {editingId ? (
+      {editingId && !isShareRoute ? (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-slate-950/20 backdrop-blur-sm">
           <div className="w-[520px] rounded-[28px] bg-white p-5 shadow-2xl">
             <div className="mb-3 text-sm font-black">見出しを編集</div>
@@ -1197,86 +1383,94 @@ export default function MindMapTool() {
         </div>
       ) : null}
 
-      <main
-        className={(panning || dragState?.active ? "cursor-grabbing" : "cursor-grab") + " relative z-10 h-full w-full"}
-        onMouseDown={startPan}
-        onMouseMove={movePan}
-        onMouseUp={stopPan}
-        onMouseLeave={stopPan}
-        onWheel={onWheel}
-      >
-        <div
-          className="absolute left-0 top-0 origin-top-left"
-          style={{
-            transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.zoom})`,
-          }}
+      {shareState.status === "none" || isSharedView ? (
+        <main
+          className={(panning || dragState?.active ? "cursor-grabbing" : "cursor-grab") + " relative z-10 h-full w-full"}
+          onMouseDown={startPan}
+          onMouseMove={movePan}
+          onMouseUp={stopPan}
+          onMouseLeave={stopPan}
+          onWheel={onWheel}
         >
-          <svg className="pointer-events-none absolute overflow-visible" width="1" height="1">
-            <AnimatePresence initial={false}>
-              {visualDrawn.edges.map((edge, index) => (
-                <AnimatedEdge
-                  key={`${edge.from}_${edge.to}_${index}`}
-                  edge={edge}
-                  index={index}
-                  drawn={visualDrawn}
-                  activeMap={activeMap}
-                  palette={activePalette}
-                  showMode={showMode}
-                  selectedId={selectedId}
-                />
-              ))}
-            </AnimatePresence>
-          </svg>
+          <div
+            className="absolute left-0 top-0 origin-top-left"
+            style={{
+              transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.zoom})`,
+            }}
+          >
+            <svg className="pointer-events-none absolute overflow-visible" width="1" height="1">
+              <AnimatePresence initial={false}>
+                {visualDrawn.edges.map((edge, index) => (
+                  <AnimatedEdge
+                    key={`${edge.from}_${edge.to}_${index}`}
+                    edge={edge}
+                    index={index}
+                    drawn={visualDrawn}
+                    activeMap={activeMap}
+                    palette={activePalette}
+                    showMode={showMode}
+                    selectedId={selectedId}
+                  />
+                ))}
+              </AnimatePresence>
+            </svg>
 
-          {dragIndicator ? (
-            <div
-              className="pointer-events-none absolute z-20 h-1 w-44 -translate-y-1/2 rounded-full bg-slate-900/45 shadow-sm ring-2 ring-white/80"
-              style={{ left: dragIndicator.x, top: dragIndicator.y }}
-            />
-          ) : null}
-
-          {Object.keys(visualDrawn.positions).map((nodeId) => {
-            const node = activeMap.nodes[nodeId];
-            const pos = visualDrawn.positions[nodeId];
-
-            if (!node || !isPoint(pos)) return null;
-
-            const canDragNode = !showMode && Boolean(node.parentId) && children(activeMap.nodes, node.parentId).length > 1;
-            const isDraggingNode = dragState?.active && dragState.nodeId === nodeId;
-            const isDraggingSubtree = dragVisual.nodeIds.has(nodeId);
-
-            return (
-              <Topic
-                key={nodeId}
-                node={node}
-                count={childCount(activeMap.nodes, nodeId)}
-                pos={pos}
-                selected={selectedId === nodeId}
-                hidden={drawn.visibility && drawn.visibility[nodeId] === false}
-                readOnly={showMode}
-                isMajor={node.parentId === activeMap.rootId}
-                focusMode={showMode}
-                focused={selectedId === nodeId}
-                palette={activePalette}
-                draggable={canDragNode}
-                dragging={isDraggingNode}
-                draggingSubtree={isDraggingSubtree}
-                onSelect={selectNode}
-                onEdit={beginEdit}
-                onBeginDrag={beginNodeDrag}
-                onAdd={addChild}
-                onSibling={addSibling}
-                onDelete={removeNode}
-                onToggle={(x) =>
-                  showMode
-                    ? updateShowNode(x, { collapsed: !activeMap.nodes[x].collapsed })
-                    : updateNode(x, { collapsed: !map.nodes[x].collapsed })
-                }
+            {dragIndicator ? (
+              <div
+                className="pointer-events-none absolute z-20 h-1 w-44 -translate-y-1/2 rounded-full bg-slate-900/45 shadow-sm ring-2 ring-white/80"
+                style={{ left: dragIndicator.x, top: dragIndicator.y }}
               />
-            );
-          })}
-        </div>
-      </main>
+            ) : null}
+
+            {Object.keys(visualDrawn.positions).map((nodeId) => {
+              const node = activeMap.nodes[nodeId];
+              const pos = visualDrawn.positions[nodeId];
+
+              if (!node || !isPoint(pos)) return null;
+
+              const canDragNode =
+                !showMode &&
+                !isSharedView &&
+                Boolean(node.parentId) &&
+                children(activeMap.nodes, node.parentId).length > 1;
+              const isDraggingNode = dragState?.active && dragState.nodeId === nodeId;
+              const isDraggingSubtree = dragVisual.nodeIds.has(nodeId);
+
+              return (
+                <Topic
+                  key={nodeId}
+                  node={node}
+                  count={childCount(activeMap.nodes, nodeId)}
+                  pos={pos}
+                  selected={selectedId === nodeId}
+                  hidden={drawn.visibility && drawn.visibility[nodeId] === false}
+                  readOnly={showMode || isSharedView}
+                  isMajor={node.parentId === activeMap.rootId}
+                  focusMode={showMode}
+                  focused={selectedId === nodeId}
+                  palette={activePalette}
+                  draggable={canDragNode}
+                  dragging={isDraggingNode}
+                  draggingSubtree={isDraggingSubtree}
+                  onSelect={selectNode}
+                  onEdit={beginEdit}
+                  onBeginDrag={beginNodeDrag}
+                  onAdd={addChild}
+                  onSibling={addSibling}
+                  onDelete={removeNode}
+                  onToggle={(x) =>
+                    isSharedView
+                      ? updateSharedNode(x, { collapsed: !activeMap.nodes[x].collapsed })
+                      : showMode
+                        ? updateShowNode(x, { collapsed: !activeMap.nodes[x].collapsed })
+                        : updateNode(x, { collapsed: !map.nodes[x].collapsed })
+                  }
+                />
+              );
+            })}
+          </div>
+        </main>
+      ) : null}
     </div>
   );
 }
