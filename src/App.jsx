@@ -60,7 +60,7 @@ const ANNOUNCEMENTS = [
 
 const ANNOUNCEMENT_META = [
   { date: "2026.06.15", release: "2026.06.15-share-link", releaseOrder: 3 },
-  { date: "2026.05.28", release: "2026.05.28-image-sharing", releaseOrder: 2 },
+  { date: "2026.06.15", release: "2026.06.15-share-link", releaseOrder: 3 },
   { date: "2026.05.28", release: "2026.05.28-initial", releaseOrder: 1 },
   { date: "2026.05.28", release: "2026.05.28-initial", releaseOrder: 1 },
   { date: "2026.05.28", release: "2026.05.28-initial", releaseOrder: 1 },
